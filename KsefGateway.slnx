@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/KsefGateway.JpkWorker/KsefGateway.JpkWorker.csproj" />
+    <Project Path="src/KsefGateway.KsefService/KsefGateway.KsefService.csproj" />
+    <Project Path="src/KsefGateway.Shared/KsefGateway.Shared.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/KsefGateway.IntegrationTests/KsefGateway.IntegrationTests.csproj" />
+    <Project Path="tests/KsefGateway.Shared.Tests/KsefGateway.Shared.Tests.csproj" />
+  </Folder>
+</Solution>

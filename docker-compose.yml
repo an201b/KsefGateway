@@ -1,0 +1,16 @@
+services:
+  ksef-db:
+    image: postgres:15-alpine
+    container_name: ksef_postgres
+    environment:
+      POSTGRES_USER: ksefuser
+      POSTGRES_PASSWORD: ksefpassword
+      POSTGRES_DB: ksefdb
+    ports:
+      - "5435docker-compose down:5432"
+    volumes:
+      - ksef-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  ksef-data:

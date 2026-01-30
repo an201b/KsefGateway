@@ -1,10 +1,10 @@
 //  KsefGateway\src\KsefGateway.KsefService\Configuration\KsefSettings.cs
-namespace KsefGateway.KsefService.Configuration;
-
-public class KsefSettings
+namespace KsefGateway.KsefService.Configuration
 {
-    public string Environment { get; set; } = "Demo";
-    public string BaseUrl { get; set; } = string.Empty;
-    public string PublicKeyUrl { get; set; } = string.Empty;
-    public string ApiToken { get; set; } = string.Empty;
+    public class KsefSettings
+    {
+        public string BaseUrl { get; set; } = string.Empty;
+        public string Nip { get; set; } = string.Empty;
+        public string AuthToken { get; set; } = string.Empty;
+    }
 }

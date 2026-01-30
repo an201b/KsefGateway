@@ -1,4 +1,9 @@
 <Solution>
+  <Folder Name="/libs/" />
+  <Folder Name="/libs/ksef-client-csharp/">
+    <Project Path="libs/ksef-client-csharp/KSeF.Client.Core/KSeF.Client.Core.csproj" />
+    <Project Path="libs/ksef-client-csharp/KSeF.Client/KSeF.Client.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/KsefGateway.JpkWorker/KsefGateway.JpkWorker.csproj" />
     <Project Path="src/KsefGateway.KsefService/KsefGateway.KsefService.csproj" />

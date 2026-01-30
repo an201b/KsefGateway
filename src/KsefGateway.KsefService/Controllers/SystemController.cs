@@ -1,84 +1,52 @@
-using KsefGateway.KsefService.Configuration;
-using KsefGateway.KsefService.Services;
+// src\KsefGateway.KsefService\Controllers\SystemController.cs
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
+using KsefGateway.KsefService.Services;
 
-namespace KsefGateway.KsefService.Controllers;
-
-[ApiController]
-[Route("api/[controller]")]
-public class SystemController : ControllerBase
+namespace KsefGateway.KsefService.Controllers
 {
-    private readonly KsefSettings _settings;
-    private readonly KsefClient _ksefClient;
-
-    public SystemController(
-        IOptions<KsefSettings> settings,
-        KsefClient ksefClient)
+    [ApiController]
+    [Route("api/[controller]")]
+    public class SystemController : ControllerBase
     {
-        _settings = settings.Value;
-        _ksefClient = ksefClient;
-    }
+        private readonly KsefAuthService _authService;
 
-    [HttpGet("status")]
-    public IActionResult GetStatus()
-    {
-        return Ok(new
+        // Внедряем наш новый умный сервис
+        public SystemController(KsefAuthService authService)
         {
-            Status = "Online",
-            Service = "KSeF Gateway",
-            KsefEnvironment = _settings.Environment,
-            KsefUrl = _settings.BaseUrl
-        });
-    }
-
-    /// <summary>
-    /// Проверка связи с KSeF (получение AuthorisationChallenge)
-    /// </summary>
-    [HttpGet("test-connection")]
-    public async Task<IActionResult> TestKsefConnection(
-        [FromQuery] string nip,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(nip))
-        {
-            return BadRequest(new
-            {
-                Error = "NIP is required",
-                Example = "/api/system/test-connection?nip=5423240211"
-            });
+            _authService = authService;
         }
 
-        try
+        // === ГЛАВНЫЙ ТЕСТ ===
+        // 1. Если токен есть в базе - вернет мгновенно.
+        // 2. Если нет - сам сделает вход и вернет результат.
+        [HttpGet("token")]
+        public async Task<IActionResult> GetToken()
         {
-            var challenge = await _ksefClient
-                .GetAuthorisationChallengeAsync(nip, cancellationToken);
-
-            return Ok(new
+            try
             {
-                Message = "Успешное соединение с KSeF",
-                ServerTimestampMs = challenge.Timestamp,
-                Challenge = challenge.Challenge
-            });
-        }
-        catch (Exception ex)
-        {
-            // Собираем полную цепочку исключений
-            var fullErrorMessage = ex.Message;
-            var inner = ex.InnerException;
+                // Замеряем время выполнения внутри контроллера (для наглядности)
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                
+                var token = await _authService.GetAccessTokenAsync();
+                
+                watch.Stop();
 
-            while (inner != null)
-            {
-                fullErrorMessage += " ---> " + inner.Message;
-                inner = inner.InnerException;
+                return Ok(new 
+                { 
+                    Token = token, 
+                    TimeTaken = $"{watch.Elapsed.TotalSeconds:F2} sec",
+                    Message = watch.Elapsed.TotalSeconds < 1.0 
+                        ? "FAST! (Loaded from Database)" 
+                        : "SLOW. (Performed Full Login)"
+                });
             }
-
-            return BadRequest(new
+            catch (Exception ex)
             {
-                Error = "Ошибка соединения с KSeF",
-                Details = fullErrorMessage,
-                ExceptionType = ex.GetType().Name
-            });
+                return BadRequest(new { Error = ex.Message });
+            }
         }
+        
+        [HttpGet("status")]
+        public IActionResult Status() => Ok("Gateway is running.");
     }
 }

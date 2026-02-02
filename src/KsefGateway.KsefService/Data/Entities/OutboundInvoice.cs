@@ -15,6 +15,10 @@ namespace KsefGateway.KsefService.Data.Entities
         [MaxLength(50)]
         public string InvoiceNumber { get; set; } = string.Empty; 
         
+        // --- ВОТ ЭТО НУЖНО ДОБАВИТЬ: ---
+        public DateTime? ProcessedAt { get; set; }  // Время последней попытки обработки
+        // -------------------------------
+        
         public string? KsefReferenceNumber { get; set; } 
         
         // БЫЛО: public int Status { get; set; }

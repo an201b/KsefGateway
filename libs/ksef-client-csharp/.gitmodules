@@ -1,3 +1,0 @@
-[submodule "KSeF.Client.Tests.PdfTestApp/Externals/ksef-pdf-generator"]
-	path = KSeF.Client.Tests.PdfTestApp/Externals/ksef-pdf-generator
-	url = https://github.com/CIRFMF/ksef-pdf-generator.git

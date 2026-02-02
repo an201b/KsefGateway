@@ -1,0 +1,234 @@
+//   Components/Pages/Home.razor
+@page "/"
+@using Microsoft.EntityFrameworkCore
+@inject KsefContext Db
+@inject KsefAuthService AuthService
+@attribute [StreamRendering]
+@rendermode InteractiveServer
+@using KsefGateway.KsefService.Services
+
+@inject LogService LogService
+@implements IDisposable
+
+<h3>📊 Gateway Status</h3>
+
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card text-white bg-primary mb-3">
+            <div class="card-header">New (Queue)</div>
+            <div class="card-body">
+                <h1 class="card-title">@_stats.New</h1>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-success mb-3">
+            <div class="card-header">Sent to KSeF</div>
+            <div class="card-body">
+                <h1 class="card-title">@_stats.Sent</h1>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-danger mb-3">
+            <div class="card-header">Errors</div>
+            <div class="card-body">
+                <h1 class="card-title">@_stats.Error</h1>
+            </div>
+        </div>
+    </div>
+        <div class="col-md-3">
+        <div class="card bg-light mb-3">
+            <div class="card-header">Token Status</div>
+            <div class="card-body">
+                 @if(_hasToken) 
+                 { <span class="badge bg-success">Active</span> } 
+                 else 
+                 { <span class="badge bg-warning text-dark">No Token</span> }
+            </div>
+        </div>
+    </div>
+</div>
+
+<h4>Recent Invoices</h4>
+<table class="table table-striped">
+    <thead>
+        <tr>
+            <th>Time</th>
+            <th>Invoice #</th>
+            <th>Status</th>
+            <th>KSeF Ref / Error</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var inv in _recentInvoices)
+        {
+            <tr>
+                <td>@inv.CreatedAt.ToString("HH:mm:ss")</td>
+                <td>@inv.InvoiceNumber</td>
+                <td>
+                    <span class="badge @GetBadgeClass(inv.Status)">@inv.Status</span>
+                </td>
+                <td>
+                    @if(!string.IsNullOrEmpty(inv.KsefReferenceNumber))
+                    { <small>@inv.KsefReferenceNumber</small> }
+                    else if(!string.IsNullOrEmpty(inv.ErrorMessage))
+                    { <small class="text-danger">@inv.ErrorMessage</small> }
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+
+<div class="d-flex gap-2 mb-3">
+    <button class="btn btn-outline-primary" @onclick="LoadData">🔄 Refresh</button>
+    
+    @if (_stats.Error > 0)
+    {
+        <button class="btn btn-danger" @onclick="RetryRejected">
+            🔁 Retry @_stats.Error Rejected Invoices
+        </button>
+    }
+
+    <button class="btn btn-primary" @onclick="GenerateTestInvoice">
+        ➕ Generate Test Invoice
+    </button>
+</div>
+
+<div class="card shadow-sm mt-4">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">🔌 Live Gateway Logs</h5>
+        <span class="badge bg-secondary">Real-time</span>
+    </div>
+    <div class="card-body bg-light" style="max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.9rem;">
+        @if (_logs.Length == 0)
+        {
+            <div class="text-muted text-center py-3">Waiting for events...</div>
+        }
+        else
+        {
+            <ul class="list-unstyled mb-0">
+                @foreach (var log in _logs)
+                {
+                    <li class="border-bottom py-1">
+                        <span class="text-muted small me-2">[@log.Timestamp.ToString("HH:mm:ss")]</span>
+                        <strong class="@log.ColorClass me-2">[@log.Level.ToUpper()]</strong>
+                        <span class="text-dark">@log.Message</span>
+                    </li>
+                }
+            </ul>
+        }
+    </div>
+</div>
+
+@code {
+    private (int New, int Sent, int Error) _stats;
+    private List<OutboundInvoice> _recentInvoices = new();
+    private bool _hasToken = false;
+    private LogEntry[] _logs = Array.Empty<LogEntry>(); 
+
+    protected override async Task OnInitializedAsync()
+    {
+        // 1. Подписываемся на логи
+        LogService.OnChange += HandleLogUpdate;
+        _logs = LogService.GetLogs(); 
+
+        // 2. Грузим данные из БД
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        _stats.New = await Db.OutboundInvoices.CountAsync(i => i.Status == InvoiceStatus.New);
+        _stats.Sent = await Db.OutboundInvoices.CountAsync(i => i.Status == InvoiceStatus.SentToKsef || i.Status == InvoiceStatus.Success);
+        _stats.Error = await Db.OutboundInvoices.CountAsync(i => i.Status == InvoiceStatus.Rejected);
+
+        var allInvoices = await Db.OutboundInvoices.ToListAsync();
+        
+        _recentInvoices = allInvoices
+            .OrderByDescending(i => i.CreatedAt)
+            .Take(20)
+            .ToList();
+        
+        var session = await Db.Sessions.FirstOrDefaultAsync();
+        _hasToken = session != null && session.AccessTokenExpiresAt > DateTimeOffset.UtcNow;
+    }
+
+    private string GetBadgeClass(InvoiceStatus status) => status switch
+    {
+        InvoiceStatus.New => "bg-primary",
+        InvoiceStatus.SentToKsef => "bg-warning text-dark",
+        InvoiceStatus.Success => "bg-success",
+        InvoiceStatus.Rejected => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    private async void HandleLogUpdate() // Добавлен async
+    {
+        _logs = LogService.GetLogs();
+        
+        // Добавляем обновление таблицы при каждом новом событии
+        await InvokeAsync(async () => 
+        {
+            await LoadData(); // Перечитываем статусы из БД
+            StateHasChanged(); // Перерисовываем экран
+        });
+    }
+
+    public void Dispose()
+    {
+        LogService.OnChange -= HandleLogUpdate;
+    }
+
+    // --- МЕТОДЫ ДЛЯ КНОПОК ---
+
+    private async Task RetryRejected()
+    {
+        var rejected = await Db.OutboundInvoices
+            .Where(i => i.Status == InvoiceStatus.Rejected)
+            .ToListAsync();
+
+        if (rejected.Any())
+        {
+            foreach (var inv in rejected)
+            {
+                inv.Status = InvoiceStatus.New;
+                inv.ErrorMessage = null;
+                inv.KsefReferenceNumber = null;
+            }
+            await Db.SaveChangesAsync();
+            LogService.AddLog("Warning", $"♻️ Manually reset {rejected.Count} invoices to NEW status.");
+            await LoadData();
+        }
+    }
+
+    // ВОТ ЭТОГО МЕТОДА НЕ ХВАТАЛО:
+    private async Task GenerateTestInvoice()
+    {
+        // 1. Берем NIP из базы или дефолтный
+        var myNip = await Db.Sessions.Select(s => s.Nip).FirstOrDefaultAsync() ?? "5423240211";
+
+        // 2. Генерируем номер
+        var invNum = $"FV/{DateTime.Now:yyyyMMdd}/{DateTime.Now:HHmmss}";
+        
+        // 3. Создаем XML через нашу новую Фабрику
+        // (Убедитесь, что вы создали файл InvoiceFactory.cs на предыдущем шаге!)
+        var xml = KsefGateway.KsefService.Models.InvoiceFa2.InvoiceFactory.GenerateXml(invNum, myNip, DateTime.Now);
+
+        var testInvoice = new OutboundInvoice
+        {
+            InvoiceNumber = invNum,
+            Status = InvoiceStatus.New,
+            XmlContent = xml,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        Db.OutboundInvoices.Add(testInvoice);
+        await Db.SaveChangesAsync();
+        
+        LogService.AddLog("Information", $"🆕 Created VALID FA(2) invoice: {invNum}");
+        
+        await LoadData();
+    }
+}

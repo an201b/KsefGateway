@@ -35,39 +35,32 @@ namespace KsefGateway.KsefService.Services
                     _logger.LogError(ex, "Critical error in Worker loop");
                 }
 
-                // Ждем 10 секунд перед следующей проверкой
-                await Task.Delay(10000, stoppingToken);
+                await Task.Delay(5000, stoppingToken);
             }
         }
 
         private async Task ProcessQueueAsync(CancellationToken ct)
         {
-            // Worker - это Singleton, а DbContext - Scoped. Создаем область видимости вручную.
             using var scope = _serviceProvider.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<KsefContext>();
             var authService = scope.ServiceProvider.GetRequiredService<KsefAuthService>();
             var settingsService = scope.ServiceProvider.GetRequiredService<AppSettingsService>();
             var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
 
-            // 1. Ищем новые фактуры
-            // ИСПРАВЛЕНИЕ: SQLite не умеет делать ORDER BY DateTimeOffset внутри SQL.
-            // Поэтому мы берем пачку (например, 20 штук) в порядке вставки (по умолчанию),
-            // а точную сортировку делаем уже в памяти приложения (Client-side evaluation).
+            // 1. Берем "сырые" данные (SQLite fix)
             var rawInvoices = await db.OutboundInvoices
                 .Where(i => i.Status == InvoiceStatus.New)
-                .Take(20) // Берем с запасом
+                .Take(50)
                 .ToListAsync(ct);
 
-            if (!rawInvoices.Any()) return; // Очередь пуста
+            if (!rawInvoices.Any()) return;
 
-            // Сортируем в памяти (C# делает это отлично) и берем 5 самых старых
-            var invoices = rawInvoices
-                .OrderBy(i => i.CreatedAt)
-                .Take(5)
-                .ToList();
+            // 2. Сортируем в памяти
+            var invoices = rawInvoices.OrderBy(i => i.CreatedAt).Take(5).ToList();
+
             _logger.LogInformation($"Found {invoices.Count} invoices to send.");
 
-            // 2. Получаем токен (Прозрачная авторизация через ваш сервис)
+            // 3. Получаем токен
             string token;
             try 
             {
@@ -75,75 +68,112 @@ namespace KsefGateway.KsefService.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Auth failed, skipping cycle: {ex.Message}");
+                _logger.LogError($"Auth failed: {ex.Message}");
                 return;
             }
 
-            // 3. Готовим клиента
+            // 4. Настраиваем клиента
             var client = httpClientFactory.CreateClient();
             var baseUrl = (await settingsService.GetValueAsync("Ksef:BaseUrl")).TrimEnd('/');
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            
+            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            // KSeF требует SessionToken в заголовке
+            if (client.DefaultRequestHeaders.Contains("SessionToken")) client.DefaultRequestHeaders.Remove("SessionToken");
+            client.DefaultRequestHeaders.Add("SessionToken", token);
 
-            // 4. Отправляем каждую фактуру
-            foreach (var invoice in invoices)
+foreach (var invoice in invoices)
             {
                 try
                 {
                     _logger.LogInformation($"Sending Invoice {invoice.InvoiceNumber}...");
 
-                    // --- ХЭШИРОВАНИЕ (Требование KSeF) ---
+                    // 1. Готовим байты XML
                     var xmlBytes = Encoding.UTF8.GetBytes(invoice.XmlContent);
+                    
+                    // 2. Считаем ХЭШ (SHA-256)
                     using var sha = SHA256.Create();
                     var hashBytes = sha.ComputeHash(xmlBytes);
                     var hashString = Convert.ToBase64String(hashBytes);
 
-                    // Формируем тело запроса
-                    var sendBody = new
+                    // 3. Формируем тело запроса (Строго по схеме SendInvoiceRequest)
+                    var payload = new
                     {
-                        invoiceHash = new { hashSHA = new { algorithm = "SHA-256", encoding = "Base64", value = hashString } },
-                        invoicePayload = new { type = "plain", invoiceBody = invoice.XmlContent }
+                        invoiceHash = new 
+                        { 
+                            fileSize = xmlBytes.Length,
+                            hashSHA = new 
+                            { 
+                                algorithm = "SHA-256", 
+                                encoding = "Base64", 
+                                value = hashString 
+                            } 
+                        },
+                        invoicePayload = new 
+                        { 
+                            type = "plain", 
+                            invoiceBody = invoice.XmlContent 
+                        }
                     };
-
-                    // Отправка (PUT)
-                    var response = await client.PutAsync(
-                        $"{baseUrl}/online/Invoice/Send",
-                        new StringContent(JsonSerializer.Serialize(sendBody), Encoding.UTF8, "application/json"),
+                    var fullUrl = $"{baseUrl}/online/Invoice/Send"; // Собираем URL в переменную
+                    // --- ДОБАВЬТЕ ЭТУ СТРОКУ: ---
+                    _logger.LogInformation($"[DEBUG] Sending PUT to: {fullUrl}"); 
+                    // ----------------------------
+                    // 4. ОТПРАВКА (ИСПРАВЛЕН URL)
+                    // Было: /online/invoices/send (404 Error)
+                    // Стало: /online/Invoice/Send (Правильно)
+                    var response = await client.PutAsJsonAsync(
+                        $"{baseUrl}/online/Invoice/Send", 
+                        payload, 
                         ct
                     );
-
+                    
                     var respContent = await response.Content.ReadAsStringAsync(ct);
 
                     if (response.IsSuccessStatusCode)
                     {
                         // УСПЕХ
                         var doc = JsonDocument.Parse(respContent);
-                        var refNum = doc.RootElement.GetProperty("referenceNumber").GetString();
+                        var ksefRef = doc.RootElement.GetProperty("elementReferenceNumber").GetString();
                         
-                        invoice.Status = InvoiceStatus.SentToKsef; // Меняем статус
-                        invoice.KsefReferenceNumber = refNum;
-                        invoice.SentAt = DateTimeOffset.UtcNow;
+                        invoice.Status = InvoiceStatus.Success;
+                        invoice.KsefReferenceNumber = ksefRef;
+                        invoice.ProcessedAt = DateTime.UtcNow;
                         invoice.ErrorMessage = null;
                         
-                        _logger.LogInformation($"--> SUCCESS! Ref: {refNum}");
+                        _logger.LogInformation($"✅ SUCCESS! Sent {invoice.InvoiceNumber}. KSeF Ref: {ksefRef}");
                     }
                     else
                     {
-                        // ОШИБКА KSeF (валидация XML и т.д.)
+                        // ОШИБКА
+                        _logger.LogError($"--> REJECTED [HTTP {response.StatusCode}]: {respContent}");
+
+                        string errorMsg = $"HTTP {(int)response.StatusCode}";
+                        try 
+                        {
+                            var errDoc = JsonDocument.Parse(respContent);
+                            if(errDoc.RootElement.TryGetProperty("exception", out var exElem))
+                            {
+                                var detailList = exElem.GetProperty("exceptionDetailList");
+                                errorMsg = detailList[0].GetProperty("exceptionDescription").GetString()!;
+                            }
+                        }
+                        catch {}
+
                         invoice.Status = InvoiceStatus.Rejected;
-                        invoice.ErrorMessage = respContent;
-                        _logger.LogError($"--> REJECTED: {respContent}");
+                        invoice.ErrorMessage = errorMsg;
+                        invoice.ProcessedAt = DateTime.UtcNow;
                     }
                 }
                 catch (Exception ex)
                 {
-                    // Внутренняя ошибка (сеть и т.д.)
-                    invoice.ErrorMessage = $"Internal Error: {ex.Message}";
-                    _logger.LogError($"--> EXCEPTION: {ex.Message}");
+                    _logger.LogError(ex, $"--> EXCEPTION processing invoice {invoice.InvoiceNumber}");
+                    invoice.Status = InvoiceStatus.Rejected;
+                    invoice.ErrorMessage = $"Internal: {ex.Message}";
+                    invoice.ProcessedAt = DateTime.UtcNow;
                 }
-
-                // Сохраняем изменения в базе
-                await db.SaveChangesAsync(ct);
             }
+
+            await db.SaveChangesAsync(ct);
         }
     }
 }

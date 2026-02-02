@@ -1,70 +1,57 @@
 // src/KsefGateway.KsefService/Program.cs
 using KsefGateway.KsefService.Configuration;
-using KsefGateway.KsefService.Data; // Оставляем один раз
-using KsefGateway.KsefService.Services;
+using KsefGateway.KsefService.Data;
+using KsefGateway.KsefService.Services; // Убедитесь, что этот using есть
 using Microsoft.EntityFrameworkCore;
-using KSeF.Client.DI;
-
-// === USING (Для старой библиотеки, если она еще нужна) ===
-using KSeF.Client.Core.Interfaces;          
-using KSeF.Client.Core.Interfaces.Services; 
-using KSeF.Client.Core.Interfaces.Clients; 
-using KSeF.Client.Api.Services;             
-using KSeF.Client.Api.Services.Internal;
-using KSeF.Client.Clients;
+using KsefGateway.KsefService.Components;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// --- СТАНДАРТНЫЕ СЕРВИСЫ ---
+// === 1. РЕГИСТРАЦИЯ LogService (САМОЕ ВАЖНОЕ) ===
+builder.Services.AddSingleton<LogService>(); // <--- ВОТ ЭТОГО НЕ ХВАТАЛО!
+
+// === 2. НАСТРОЙКА ЛОГГЕРА ===
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+// Регистрируем провайдер, который будет пересылать логи в LogService
+builder.Logging.Services.AddSingleton<ILoggerProvider, UiLoggerProvider>();
+
+// --- 3. ОСТАЛЬНЫЕ СЕРВИСЫ ---
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddAuthorization();
 builder.Services.Configure<KsefSettings>(builder.Configuration.GetSection("Ksef"));
 
-// --- БАЗА ДАННЫХ (SQLite) ---
-// УДАЛЕНО: UseNpgsql (Postgres нам больше не нужен)
-// ДОБАВЛЕНО: UseSqlite (Файл создастся в папке с приложением)
+// База данных SQLite
 var connectionString = "Data Source=ksef_gateway.db";
-builder.Services.AddDbContext<KsefContext>(options =>
-    options.UseSqlite(connectionString));
+builder.Services.AddDbContext<KsefContext>(options => options.UseSqlite(connectionString));
 
-// --- 1. БИБЛИОТЕКА KSEF (Legacy) ---
-builder.Services.AddKSeFClient(options =>
-{
-    options.BaseUrl = builder.Configuration["Ksef:BaseUrl"] ?? "https://ksef-demo.mf.gov.pl/api";
-});
+// Ваши сервисы
+builder.Services.AddScoped<KsefAuthService>(); 
+builder.Services.AddHttpClient(); 
+builder.Services.AddMemoryCache(); 
+builder.Services.AddScoped<AppSettingsService>(); // Лучше Scoped для работы с БД
 
-// --- 2. РУЧНАЯ РЕГИСТРАЦИЯ (Если требуется для старого кода) ---
-builder.Services.AddScoped<ICryptographyClient, CryptographyClient>();
-builder.Services.AddScoped<ICertificateFetcher, DefaultCertificateFetcher>();
-builder.Services.AddScoped<ICryptographyService, CryptographyService>();
-builder.Services.AddScoped<IAuthCoordinator, AuthCoordinator>();
-
-// --- 3. ВАШИ СЕРВИСЫ ---
-// Здесь будет жить новый AuthService
-builder.Services.AddScoped<KsefAuthService>(); // <-- Новый сервис
-// builder.Services.AddScoped<KsefIntegrationService>(); // Старый пока можно оставить или удалить
-builder.Services.AddHttpClient(); // Обязательно для нашего SystemController
-builder.Services.AddMemoryCache(); // Для кэширования настроек
-builder.Services.AddSingleton<AppSettingsService>(); // Singleton, чтобы кэш жил долго
-// 3. ВОРКЕР (Фоновая задача) - ДОБАВИТЬ ЭТУ СТРОКУ
+// Воркер
 builder.Services.AddHostedService<KsefWorker>();
+
+// UI (Blazor)
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents(); 
 
 var app = builder.Build();
 
-// --- АВТО-МИГРАЦИЯ (Zero-Config) ---
-// При каждом запуске проверяем, есть ли файл .db, и создаем таблицы
+// --- 4. МИГРАЦИЯ БД ---
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<KsefContext>();
     try 
     {
         db.Database.Migrate();
-        // МАГИЯ СКОРОСТИ: Включаем WAL режим
-        // Это позволяет читать и писать одновременно!
+        // WAL режим полезен для SQLite, чтобы не было блокировок
         db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
-        Console.WriteLine("--> Database migrated successfully (Zero-Config).");
+        Console.WriteLine("--> Database migrated successfully.");
     }
     catch (Exception ex)
     {
@@ -72,15 +59,20 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-// --- PIPELINE ---
-app.UseSwagger();
-app.UseSwaggerUI(c => 
+// --- 5. PIPELINE ---
+app.UseStaticFiles();
+app.UseAntiforgery();
+
+if (app.Environment.IsDevelopment())
 {
-    c.SwaggerEndpoint("/swagger/v1/swagger.json", "KSeF Gateway API v1");
-    c.RoutePrefix = string.Empty;
-});
+    app.UseSwagger();
+    app.UseSwaggerUI(); 
+}
 
 app.UseAuthorization();
-app.MapControllers();
+app.MapControllers(); 
+
+app.MapRazorComponents<App>()
+    .AddInteractiveServerRenderMode();
 
 app.Run();

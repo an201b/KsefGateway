@@ -1,0 +1,209 @@
+//  Components/Pages/Settings.razor 
+@page "/settings"
+@using KsefGateway.KsefService.Services
+@inject AppSettingsService SettingsService
+@inject NavigationManager Nav
+@rendermode InteractiveServer
+
+<PageTitle>Settings - KSeF Gateway</PageTitle>
+
+<div class="container mt-4">
+    <div class="card shadow-sm">
+        <div class="card-header bg-dark text-white d-flex align-items-center gap-2">
+            <span style="font-size: 1.2rem;">⚙️</span>
+            <h5 class="mb-0">Configuration</h5>
+        </div>
+        <div class="card-body">
+            
+            @if (_saved)
+            {
+                <div class="alert alert-success alert-dismissible fade show" role="alert">
+                    Settings saved successfully! Restarting authentication...
+                    <button type="button" class="btn-close" @onclick="() => _saved = false"></button>
+                </div>
+            }
+
+            <EditForm Model="@_model" OnValidSubmit="SaveSettings">
+                
+                <div class="row mb-3">
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">Identifier Type</label>
+                        <select class="form-select" @bind="_model.IdentifierType">
+                            <option value="Nip">NIP (Standard)</option>
+                            <option value="NipVatUe">NIP VAT UE</option>
+                        </select>
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label fw-bold">Value (e.g. NIP Number)</label>
+                        <InputText @bind-Value="_model.Nip" class="form-control" placeholder="1234567890" />
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Auth Token</label>
+                    <InputText @bind-Value="_model.AuthToken" class="form-control" type="password" placeholder="Paste token here..." />
+                </div>
+                
+                <div class="card bg-light mb-3">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted">Security & Validation (FA-2)</h6>
+                        
+                        <div class="mb-2">
+                            <label class="form-label small">XSD Schema URL (Validation)</label>
+                            <div class="input-group input-group-sm">
+                                <InputText @bind-Value="_model.SchemaUrl" class="form-control" />
+                                <button class="btn btn-outline-secondary" type="button" @onclick="DownloadSchema">⬇ Check</button>
+                            </div>
+                            <div class="form-text text-muted" style="font-size: 0.7rem">
+                                Default: https://crd.gov.pl/wzor/2023/06/29/12648/schemat.xsd
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-md-8">
+                                <label class="form-label small">CRL URL (Revoked Certs)</label>
+                                <InputText @bind-Value="_model.CrlUrl" class="form-control form-control-sm" />
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small">Auto-update (Days)</label>
+                                <InputNumber @bind-Value="_model.CrlUpdateDays" class="form-control form-control-sm" />
+                            </div>
+                        </div>
+                        <div class="mt-2">
+                            <small class="text-muted">Last CRL Update: <strong>@_crlLastDate</strong></small>
+                            <button type="button" class="btn btn-sm btn-outline-dark float-end" @onclick="ForceCrlUpdate">⬇ Update CRL Now</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Environment Preset</label>
+                    <select class="form-select" @onchange="OnPresetChange">
+                        <option value="" selected disabled>-- Select Environment --</option>
+                        <option value="demo">Demo / Test (API v2)</option>
+                        <option value="prod">Production (API v2)</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+
+                <div class="card bg-light mb-3">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted">Advanced Connection Settings</h6>
+                        
+                        <div class="mb-2">
+                            <label class="form-label small">Base API URL</label>
+                            <InputText @bind-Value="_model.BaseUrl" class="form-control form-control-sm" />
+                        </div>
+
+                        <div class="mb-2">
+                            <label class="form-label small">Public Key URL (Endpoint)</label>
+                            <InputText @bind-Value="_model.PublicKeyUrl" class="form-control form-control-sm" />
+                            <div class="form-text text-muted" style="font-size: 0.75rem">
+                                Usually: /security/public-key-certificates
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <hr />
+
+                <button type="submit" class="btn btn-primary w-100">
+                    💾 Save & Connect
+                </button>
+
+            </EditForm>
+        </div>
+    </div>
+</div>
+
+@code {
+    private ConfigModel _model = new();
+    private bool _saved = false;
+    private string _crlLastDate = "Never"; // Новая переменная
+
+    protected override async Task OnInitializedAsync()
+    {
+        _model.IdentifierType = await SettingsService.GetValueAsync("Ksef:IdentifierType") ?? "Nip";
+        _model.Nip = await SettingsService.GetValueAsync("Ksef:Nip");
+        _model.AuthToken = await SettingsService.GetValueAsync("Ksef:AuthToken");
+        _model.BaseUrl = await SettingsService.GetValueAsync("Ksef:BaseUrl");
+        _model.PublicKeyUrl = await SettingsService.GetValueAsync("Ksef:PublicKeyUrl");
+
+        // --- НОВЫЕ ПОЛЯ ---
+        _model.SchemaUrl = await SettingsService.GetValueAsync("Ksef:SchemaUrl") 
+            ?? "https://crd.gov.pl/wzor/2023/06/29/12648/schemat.xsd";
+            
+        _model.CrlUrl = await SettingsService.GetValueAsync("Ksef:CrlUrl");
+        
+        var days = await SettingsService.GetValueAsync("Ksef:CrlUpdateDays");
+        _model.CrlUpdateDays = int.TryParse(days, out int d) ? d : 7; // По умолчанию 7 дней
+
+        _crlLastDate = await SettingsService.GetValueAsync("Ksef:CrlLastDownload") ?? "Never";
+
+        // Дефолтные значения для Demo, если пусто
+        if (string.IsNullOrEmpty(_model.BaseUrl))
+        {
+            _model.BaseUrl = "https://api-demo.ksef.mf.gov.pl/v2";
+            _model.PublicKeyUrl = "https://api-demo.ksef.mf.gov.pl/v2/security/public-key-certificates";
+        }
+    }
+
+    private void OnPresetChange(ChangeEventArgs e)
+    {
+        var val = e.Value?.ToString();
+        if (val == "demo")
+        {
+            _model.BaseUrl = "https://api-demo.ksef.mf.gov.pl/v2";
+            _model.PublicKeyUrl = "https://api-demo.ksef.mf.gov.pl/v2/security/public-key-certificates";
+        }
+        else if (val == "prod")
+        {
+            _model.BaseUrl = "https://api.ksef.mf.gov.pl/v2";
+            _model.PublicKeyUrl = "https://api.ksef.mf.gov.pl/v2/security/public-key-certificates";
+        }
+    }
+
+    private async Task SaveSettings()
+    {
+        await SettingsService.SetValueAsync("Ksef:IdentifierType", _model.IdentifierType ?? "Nip");
+        await SettingsService.SetValueAsync("Ksef:Nip", _model.Nip ?? "");
+        await SettingsService.SetValueAsync("Ksef:AuthToken", _model.AuthToken ?? "");
+        await SettingsService.SetValueAsync("Ksef:BaseUrl", _model.BaseUrl ?? "");
+        await SettingsService.SetValueAsync("Ksef:PublicKeyUrl", _model.PublicKeyUrl ?? "");
+        
+        // --- СОХРАНЕНИЕ НОВЫХ ПОЛЕЙ ---
+        await SettingsService.SetValueAsync("Ksef:SchemaUrl", _model.SchemaUrl ?? "");
+        await SettingsService.SetValueAsync("Ksef:CrlUrl", _model.CrlUrl ?? "");
+        await SettingsService.SetValueAsync("Ksef:CrlUpdateDays", _model.CrlUpdateDays.ToString());
+        
+        _saved = true;
+    }
+
+    // --- НОВЫЕ МЕТОДЫ (Их не хватало) ---
+    private async Task DownloadSchema()
+    {
+        // Пока заглушка. Тут будет логика скачивания.
+        await Task.Delay(500); 
+    }
+    
+    private async Task ForceCrlUpdate()
+    {
+        // Пока заглушка.
+        _crlLastDate = DateTime.Now.ToString("g");
+        await SettingsService.SetValueAsync("Ksef:CrlLastDownload", _crlLastDate);
+    }
+
+    public class ConfigModel
+    {
+        public string? IdentifierType { get; set; } = "Nip";
+        public string? Nip { get; set; }
+        public string? AuthToken { get; set; }
+        public string? BaseUrl { get; set; }
+        public string? PublicKeyUrl { get; set; }
+        
+        // --- НОВЫЕ СВОЙСТВА ---
+        public string? SchemaUrl { get; set; }
+        public string? CrlUrl { get; set; }
+        public int CrlUpdateDays { get; set; } = 7;
+    }
+}

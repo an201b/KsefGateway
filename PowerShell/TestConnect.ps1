@@ -1,7 +1,9 @@
 ﻿# --- НАСТРОЙКИ ---
 $NIP = "5423240211"          # Введите ваш NIP (10 цифр)
 $TOKEN = "20260127-EC-2B84314000-F8E8C1CAF9-7D|nip-5423240211|e2ca6da648d44d16aa22789a492dea7cc4af600e8a094aaba19f9a4db28d80f3"      # Введите ваш Auth Token
-$URL = "https://api-demo.ksef.mf.gov.pl/v2"
+#$URL = "https://api-test.ksef.mf.gov.pl/v2"
+$URL = "https://api-demo.ksef.mf.gov.pl/v2" 
+$URL = "https://api-test.ksef.mf.gov.pl/v2" 
 
 
 

@@ -1,26 +1,26 @@
 //  src\KsefGateway.KsefService\Services\EncryptionService.cs
+// src\KsefGateway.KsefService\Services\EncryptionService.cs
 using System.Security.Cryptography;
-using System.Text;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace KsefGateway.KsefService.Services
 {
     public class EncryptionService
     {
-        private readonly HttpClient _httpClient;
-        
-        // Храним сгенерированный ключ AES, чтобы потом им шифровать файлы (если нужно)
-        public byte[] CurrentAesKey { get; private set; }
-        public byte[] CurrentIv { get; private set; }
+        // Инициализируем пустыми массивами, чтобы не было Warning CS8618
+        public byte[] CurrentAesKey { get; private set; } = Array.Empty<byte>();
+        public byte[] CurrentIv { get; private set; } = Array.Empty<byte>();
 
-        public EncryptionService(IHttpClientFactory httpClientFactory)
+        public EncryptionService()
         {
-            _httpClient = httpClientFactory.CreateClient();
+            // Генерируем ключи сразу при создании сервиса
+            GenerateAesKeys();
         }
 
-        public async Task<(string EncryptedKey, string Iv)> PrepareSessionKeysAsync(string publicKeyUrl)
+        public void GenerateAesKeys()
         {
-            // 1. Генерируем AES ключ (32 байта) и IV (16 байт)
             using var aes = Aes.Create();
             aes.KeySize = 256;
             aes.GenerateKey();
@@ -28,26 +28,59 @@ namespace KsefGateway.KsefService.Services
 
             CurrentAesKey = aes.Key;
             CurrentIv = aes.IV;
+        }
 
-            // 2. Скачиваем Публичный Ключ Минфина (PEM/CER)
-            // В реальном проекте лучше кэшировать этот ключ, чтобы не качать каждый раз
-            var publicKeyPem = await _httpClient.GetStringAsync(publicKeyUrl);
-            
-            // 3. Шифруем AES-ключ публичным ключом Минфина (RSA OAEP SHA256)
-            using var rsa = RSA.Create();
-            
-            // KSeF обычно отдает ключ в формате PEM X.509
-            // Нам нужно вырезать заголовки -----BEGIN... если ImportFromPem не сработает,
-            // но в .NET 6+ ImportFromPem работает отлично.
-            rsa.ImportFromPem(publicKeyPem);
+        // Метод принимает уже СКАЧАННУЮ строку ключа (из KsefClient), а не URL
+        public (string EncryptedKey, string Iv) PrepareSessionKeys(string publicKeyPem)
+        {
+            // 1. Очищаем ключ от заголовков и пробелов (Critical!)
+            var cleanKey = CleanPem(publicKeyPem);
 
-            var encryptedKeyBytes = rsa.Encrypt(CurrentAesKey, RSAEncryptionPadding.OaepSHA256);
+            try 
+            {
+                var keyBytes = Convert.FromBase64String(cleanKey);
+                using var rsa = RSA.Create();
 
-            // 4. Возвращаем Base64 строки для JSON
-            return (
-                Convert.ToBase64String(encryptedKeyBytes),
-                Convert.ToBase64String(CurrentIv)
-            );
+                // 2. Пытаемся импортировать ключ
+                try 
+                { 
+                    rsa.ImportSubjectPublicKeyInfo(keyBytes, out _); 
+                }
+                catch 
+                {
+                    // Fallback: Если это сертификат (X.509)
+                    using var cert = X509CertificateLoader.LoadCertificate(keyBytes);
+                    using var certRsa = cert.GetRSAPublicKey();
+                    if (certRsa == null) throw new Exception("Certificate has no RSA key");
+                    
+                    var encryptedCert = certRsa.Encrypt(CurrentAesKey, RSAEncryptionPadding.OaepSHA256);
+                    return (Convert.ToBase64String(encryptedCert), Convert.ToBase64String(CurrentIv));
+                }
+
+                // 3. Шифруем AES-ключ
+                var encryptedBytes = rsa.Encrypt(CurrentAesKey, RSAEncryptionPadding.OaepSHA256);
+
+                return (
+                    Convert.ToBase64String(encryptedBytes),
+                    Convert.ToBase64String(CurrentIv)
+                );
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Encryption failed: {ex.Message}");
+            }
+        }
+
+        private string CleanPem(string pem)
+        {
+            return Regex.Replace(pem
+                .Replace("-----BEGIN PUBLIC KEY-----", "")
+                .Replace("-----END PUBLIC KEY-----", "")
+                .Replace("-----BEGIN CERTIFICATE-----", "")
+                .Replace("-----END CERTIFICATE-----", "")
+                .Replace("\\n", "")
+                .Replace("\n", "")
+                .Replace("\r", ""), @"\s+", "");
         }
     }
 }

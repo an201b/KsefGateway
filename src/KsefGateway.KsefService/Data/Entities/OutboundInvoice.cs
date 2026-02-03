@@ -15,14 +15,11 @@ namespace KsefGateway.KsefService.Data.Entities
         [MaxLength(50)]
         public string InvoiceNumber { get; set; } = string.Empty; 
         
-        // --- ВОТ ЭТО НУЖНО ДОБАВИТЬ: ---
         public DateTime? ProcessedAt { get; set; }  // Время последней попытки обработки
-        // -------------------------------
         
         public string? KsefReferenceNumber { get; set; } 
         
-        // БЫЛО: public int Status { get; set; }
-        // СТАЛО: Используем сам Enum. EF Core сохранит его как int автоматически.
+        // Используем Enum. EF Core сохранит его как int.
         public InvoiceStatus Status { get; set; } = InvoiceStatus.New;
         
         public string XmlContent { get; set; } = string.Empty; 
@@ -38,8 +35,8 @@ namespace KsefGateway.KsefService.Data.Entities
     {
         New = 0,            
         Processing = 1,     
-        SentToKsef = 2,     
-        Success = 3,        
-        Rejected = 4        
+        SentToKsef = 2,     // Фактура ушла в KSeF, получен ReferenceNumber
+        Success = 3,        // (На будущее) Получено UPO
+        Rejected = 4        // Ошибка отправки или валидации
     }
 }

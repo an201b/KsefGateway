@@ -1,65 +1,76 @@
 // src\KsefGateway.KsefService\Controllers\DebugController.cs
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using KsefGateway.KsefService.Data;
 using KsefGateway.KsefService.Services;
-using KsefGateway.KsefService.Models.InvoiceFa2; // Убедитесь, что InvoiceFactory здесь
+using KsefGateway.KsefService.Configuration;
+using KsefGateway.KsefService.Models.InvoiceFa2; 
+using System.Text;
 
-namespace KsefGateway.KsefService.Controllers
+namespace KsefGateway.KsefService.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class DebugController : ControllerBase
 {
-    [ApiController]
-    [Route("api/[controller]")]
-    public class DebugController : ControllerBase
+    private readonly KsefAuthService _authService;
+    private readonly KsefClient _ksefClient;
+    private readonly ILogger<DebugController> _logger;
+
+    public DebugController(KsefAuthService authService, KsefClient ksefClient, ILogger<DebugController> logger)
     {
-        private readonly AppSettingsService _settingsService;
-        private readonly KsefContext _db;
+        _authService = authService;
+        _ksefClient = ksefClient;
+        _logger = logger;
+    }
 
-        public DebugController(AppSettingsService settingsService, KsefContext db)
+    [HttpPost("check-login")]
+    public async Task<IActionResult> CheckLogin()
+    {
+        try
         {
-            _settingsService = settingsService;
-            _db = db;
+            var session = await _authService.GetSessionAsync();
+            return Ok(new 
+            { 
+                Message = "✅ Auth Success!", 
+                TokenPreview = session.Token.Substring(0, 15) + "...",
+                SessionReferenceNumber = session.ReferenceNumber // ПОКАЗЫВАЕМ ЕГО
+            });
         }
-
-        // 1. Узнать, куда смотрит шлюз прямо сейчас
-        [HttpGet("config")]
-        public async Task<IActionResult> GetCurrentConfig()
+        catch (Exception ex)
         {
-            var baseUrl = await _settingsService.GetValueAsync("Ksef:BaseUrl");
-            var nip = await _settingsService.GetValueAsync("Ksef:Nip");
-            
-            // Проверка на частую ошибку с /v2
-            var status = "OK";
-            if (!string.IsNullOrEmpty(baseUrl) && !baseUrl.EndsWith("/api"))
-            {
-                status = "WARNING: URL usually should end with /api for KSeF v2 (check your settings!)";
-            }
+            return BadRequest(new { Error = ex.Message });
+        }
+    }
+
+    [HttpPost("send-file")]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> SendInvoiceFile(IFormFile file)
+    {
+        if (file == null) return BadRequest("File is empty.");
+
+        try
+        {
+            using var reader = new StreamReader(file.OpenReadStream(), Encoding.UTF8);
+            var xmlContent = await reader.ReadToEndAsync();
+
+            _logger.LogInformation($"Sending file: {file.FileName}...");
+
+            // 1. Получаем Сессию (Токен + RefNumber)
+            var session = await _authService.GetSessionAsync();
+
+            // 2. Отправляем (Передаем оба параметра!)
+            var resultRef = await _ksefClient.SendInvoiceAsync(xmlContent, session.Token, session.ReferenceNumber);
 
             return Ok(new 
             { 
-                Status = status,
-                CurrentBaseUrl = baseUrl,
-                CurrentNip = nip,
-                ServerTime = DateTime.UtcNow
+                Message = "✅ Invoice Sent!", 
+                KsefReferenceNumber = resultRef
             });
         }
-
-        // 2. Получить свежий XML для тестов
-        [HttpGet("xml")]
-        public async Task<IActionResult> GetTestXml()
+        catch (Exception ex)
         {
-            // Берем NIP из настроек или базы
-            var nip = await _settingsService.GetValueAsync("Ksef:Nip") 
-                      ?? await _db.Sessions.Select(s => s.Nip).FirstOrDefaultAsync() 
-                      ?? "1111111111";
-
-            // Генерируем уникальный номер фактуры
-            var invNumber = $"TEST-{DateTime.UtcNow:HHmmss}";
-
-            // Генерируем XML через нашу фабрику
-            var xmlContent = InvoiceFactory.GenerateXml(invNumber, nip, DateTime.Now);
-
-            // Возвращаем как файл, чтобы браузер или PowerShell красиво его приняли
-            return Content(xmlContent, "application/xml");
+            return BadRequest(new { Error = "SEND ERROR", Message = ex.Message });
         }
     }
 }

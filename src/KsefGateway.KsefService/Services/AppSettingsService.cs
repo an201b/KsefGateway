@@ -86,13 +86,25 @@ namespace KsefGateway.KsefService.Services
             _cache.Remove(key);
         }
 
+        // === ИСПРАВЛЕННЫЙ МЕТОД: Маппинг старых ключей на новые свойства ===
         private string GetDefaultFromConfig(string key)
         {
             return key switch
             {
-                "Ksef:Nip" => _defaultSettings.Nip,
-                "Ksef:AuthToken" => _defaultSettings.AuthToken,
+                // Логика: Если просят NIP, пытаемся вырезать его из ApiToken (542...|Hash)
+                "Ksef:Nip" => _defaultSettings.ApiToken.Contains('|') 
+                              ? _defaultSettings.ApiToken.Split('|')[0] 
+                              : "5423240211", // Fallback если токена нет
+
+                // Логика: AuthToken теперь равен ApiToken
+                "Ksef:AuthToken" => _defaultSettings.ApiToken,
+
+                // Базовый URL без изменений
                 "Ksef:BaseUrl" => _defaultSettings.BaseUrl,
+
+                // Остальные ключи
+                "Ksef:IdentifierType" => "onip", // Стандарт для Gateway, хотя v2 использует Nip
+                
                 _ => string.Empty
             };
         }

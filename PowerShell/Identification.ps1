@@ -1,4 +1,7 @@
-﻿using System.Net.Http.Headers;
+﻿$path = "C:\Projects\KsefGateway\src\KsefGateway.KsefService\Services\KsefAuthService.cs"
+
+$code = @"
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -296,3 +299,7 @@ namespace KsefGateway.KsefService.Services
         }
     }
 }
+"@
+
+Set-Content -Path $path -Value $code -Encoding UTF8
+Write-Host "✅ Код защищен от пустого URL!" -ForegroundColor Green

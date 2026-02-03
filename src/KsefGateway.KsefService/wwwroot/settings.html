@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KSeF Gateway Settings</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background-color: #f4f4f9; }
+        .card { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { margin-top: 0; color: #333; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; color: #555; }
+        input, select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        input:focus, select:focus { border-color: #007bff; outline: none; }
+        button { background-color: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; width: 100%; }
+        button:hover { background-color: #0056b3; }
+        .hint { font-size: 12px; color: #888; margin-top: 5px; }
+        #message { margin-top: 20px; padding: 10px; border-radius: 4px; display: none; text-align: center; }
+        .success { background-color: #d4edda; color: #155724; }
+        .error { background-color: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>⚙️ KSeF Configuration</h1>
+        
+        <div class="form-group">
+            <label>API Environment Base URL</label>
+            <input type="text" id="baseUrl" placeholder="https://api-test.ksef.mf.gov.pl/v2">
+            <div class="hint">Use <b>https://api-test.ksef.mf.gov.pl/v2</b> for TEST (v2)</div>
+        </div>
+
+        <div class="form-group">
+            <label>Public Key URL</label>
+            <input type="text" id="publicKeyUrl" placeholder="https://api-test.ksef.mf.gov.pl/v2/security/public-key-certificates">
+        </div>
+
+        <div class="form-group">
+            <label>NIP (Tax ID)</label>
+            <input type="text" id="nip" placeholder="e.g. 5423240211">
+        </div>
+
+        <div class="form-group">
+            <label>Identifier Type (API v2)</label>
+            <select id="identifierType">
+                <option value="onip">ONIP (Organization - Required for Companies)</option>
+                <option value="nip">NIP (Individual / Legacy)</option>
+            </select>
+            <div class="hint">⚠️ For v2 companies, you MUST select <b>ONIP</b>.</div>
+        </div>
+
+        <div class="form-group">
+            <label>Authorization Token</label>
+            <input type="password" id="authToken" placeholder="Paste your generated token here">
+        </div>
+
+        <button onclick="saveSettings()">Save Configuration</button>
+        <div id="message"></div>
+    </div>
+
+    <script>
+        const API_URL = '/api/settings';
+
+        async function loadSettings() {
+            try {
+                const res = await fetch(API_URL);
+                const data = await res.json();
+                
+                document.getElementById('baseUrl').value = data.baseUrl || '';
+                document.getElementById('publicKeyUrl').value = data.publicKeyUrl || '';
+                document.getElementById('nip').value = data.nip || '';
+                // Выбираем правильный пункт в списке
+                document.getElementById('identifierType').value = data.identifierType || 'onip';
+                document.getElementById('authToken').value = data.authToken || '';
+            } catch (err) {
+                console.error('Failed to load settings', err);
+            }
+        }
+
+        async function saveSettings() {
+            const btn = document.querySelector('button');
+            const msg = document.getElementById('message');
+            btn.disabled = true;
+            btn.innerText = "Saving...";
+
+            const payload = {
+                baseUrl: document.getElementById('baseUrl').value,
+                publicKeyUrl: document.getElementById('publicKeyUrl').value,
+                nip: document.getElementById('nip').value,
+                identifierType: document.getElementById('identifierType').value,
+                authToken: document.getElementById('authToken').value
+            };
+
+            try {
+                const res = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (res.ok) {
+                    msg.className = 'success';
+                    msg.innerText = '✅ Settings saved successfully! (Database updated)';
+                } else {
+                    msg.className = 'error';
+                    msg.innerText = '❌ Error saving settings.';
+                }
+            } catch (err) {
+                msg.className = 'error';
+                msg.innerText = '❌ Network error.';
+            } finally {
+                msg.style.display = 'block';
+                btn.disabled = false;
+                btn.innerText = "Save Configuration";
+            }
+        }
+
+        // Load on startup
+        loadSettings();
+    </script>
+</body>
+</html>

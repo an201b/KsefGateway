@@ -15,46 +15,25 @@ namespace KsefGateway.KsefService.Controllers
             _settingsService = settingsService;
         }
 
-        [HttpGet]
-        public async Task<IActionResult> GetSettings()
+        [HttpGet("{key}")]
+        public async Task<IActionResult> Get(string key)
         {
-            var settings = new
-            {
-                BaseUrl = await _settingsService.GetValueAsync("Ksef:BaseUrl"),
-                PublicKeyUrl = await _settingsService.GetValueAsync("Ksef:PublicKeyUrl"),
-                Nip = await _settingsService.GetValueAsync("Ksef:Nip"),
-                IdentifierType = await _settingsService.GetValueAsync("Ksef:IdentifierType") ?? "onip", // Значение по умолчанию
-                AuthToken = await _settingsService.GetValueAsync("Ksef:AuthToken")
-            };
-
-            return Ok(settings);
+            var val = await _settingsService.GetValueAsync(key);
+            return Ok(new { Key = key, Value = val });
         }
 
         [HttpPost]
-        public async Task<IActionResult> SaveSettings([FromBody] KsefSettingsModel model)
+        public async Task<IActionResult> Set([FromBody] SettingDto dto)
         {
-            if (model == null) return BadRequest();
-
-            // Сохраняем все поля в базу данных
-            await _settingsService.SetValueAsync("Ksef:BaseUrl", model.BaseUrl);
-            await _settingsService.SetValueAsync("Ksef:PublicKeyUrl", model.PublicKeyUrl);
-            await _settingsService.SetValueAsync("Ksef:Nip", model.Nip);
-            
-            // !!! Важное поле, которое исправляет ошибку 21001
-            await _settingsService.SetValueAsync("Ksef:IdentifierType", model.IdentifierType);
-            
-            await _settingsService.SetValueAsync("Ksef:AuthToken", model.AuthToken);
-
-            return Ok(new { Message = "Settings saved successfully" });
+            await _settingsService.SetValueAsync(dto.Key, dto.Value);
+            return Ok(new { Message = "Setting updated. Hot reload active." });
         }
-    }
 
-    public class KsefSettingsModel
-    {
-        public string BaseUrl { get; set; } = string.Empty;
-        public string PublicKeyUrl { get; set; } = string.Empty;
-        public string Nip { get; set; } = string.Empty;
-        public string IdentifierType { get; set; } = "onip";
-        public string AuthToken { get; set; } = string.Empty;
+        //public class SettingDto { public string Key { get; set; } public string Value { get; set; } }
+        public class SettingDto 
+        { 
+            public string Key { get; set; } = string.Empty; 
+            public string Value { get; set; } = string.Empty; 
+        }
     }
 }

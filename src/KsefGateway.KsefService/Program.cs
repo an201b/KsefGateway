@@ -1,81 +1,78 @@
 // src/KsefGateway.KsefService/Program.cs
 using KsefGateway.KsefService.Configuration;
 using KsefGateway.KsefService.Data;
-using KsefGateway.KsefService.Services;
+using KsefGateway.KsefService.Services; // Убедитесь, что этот using есть
 using Microsoft.EntityFrameworkCore;
 using KsefGateway.KsefService.Components;
-using Microsoft.Extensions.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// === 1. ЛОГИРОВАНИЕ ===
-builder.Services.AddSingleton<LogService>();
+// === 1. РЕГИСТРАЦИЯ LogService (САМОЕ ВАЖНОЕ) ===
+builder.Services.AddSingleton<LogService>(); // <--- ВОТ ЭТОГО НЕ ХВАТАЛО!
+
+// === 2. НАСТРОЙКА ЛОГГЕРА ===
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
-builder.Services.AddSingleton<ILoggerProvider, UiLoggerProvider>();
+// Регистрируем провайдер, который будет пересылать логи в LogService
+builder.Logging.Services.AddSingleton<ILoggerProvider, UiLoggerProvider>();
 
-// === 2. СЕРВИСЫ ===
+// --- 3. ОСТАЛЬНЫЕ СЕРВИСЫ ---
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddAuthorization();
 builder.Services.Configure<KsefSettings>(builder.Configuration.GetSection("Ksef"));
 
-// База данных
-builder.Services.AddDbContext<KsefContext>(options => 
-    options.UseSqlite("Data Source=ksef_gateway.db"));
+// База данных SQLite
+var connectionString = "Data Source=ksef_gateway.db";
+builder.Services.AddDbContext<KsefContext>(options => options.UseSqlite(connectionString));
 
-// Http Client
-builder.Services.AddHttpClient();
+// Ваши сервисы
+builder.Services.AddScoped<KsefAuthService>(); 
+builder.Services.AddHttpClient(); 
+builder.Services.AddMemoryCache(); 
+builder.Services.AddScoped<AppSettingsService>(); // Лучше Scoped для работы с БД
 
-// Кэш (ОБЯЗАТЕЛЬНО для AppSettingsService)
-builder.Services.AddMemoryCache();
+// Воркер
+builder.Services.AddHostedService<KsefWorker>();
 
-// Наши сервисы
-builder.Services.AddScoped<AppSettingsService>();
-builder.Services.AddScoped<KsefAuthService>();
-
-// === 3. ФОНОВЫЕ ЗАДАЧИ (ОТКЛЮЧЕНО НА ВРЕМЯ ОТЛАДКИ) ===
-// builder.Services.AddHostedService<KsefWorker>(); // <--- ЗАКОММЕНТИРОВАНО!
-
-// === 4. UI (BLAZOR) ===
+// UI (Blazor)
 builder.Services.AddRazorComponents()
-    .AddInteractiveServerComponents();
+    .AddInteractiveServerComponents(); 
 
 var app = builder.Build();
 
-// === 5. PIPELINE ===
-// Включение Swagger
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
-
-app.UseStaticFiles();
-app.UseAntiforgery();
-
-app.UseAuthorization();
-app.MapControllers();
-
-// Blazor Dashboard
-app.MapRazorComponents<App>()
-    .AddInteractiveServerRenderMode();
-
-// Инициализация БД
+// --- 4. МИГРАЦИЯ БД ---
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<KsefContext>();
     try 
     {
-        db.Database.EnsureCreated();
-        db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;"); // Ускоряет SQLite
-        Console.WriteLine("--> Database ready (WAL mode).");
+        db.Database.Migrate();
+        // WAL режим полезен для SQLite, чтобы не было блокировок
+        db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
+        Console.WriteLine("--> Database migrated successfully.");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"--> DB Error: {ex.Message}");
+        Console.WriteLine($"--> !!! Database migration failed: {ex.Message}");
     }
 }
+
+// --- 5. PIPELINE ---
+app.UseStaticFiles();
+app.UseAntiforgery();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(); 
+}
+
+app.UseAuthorization();
+app.MapControllers(); 
+
+app.MapRazorComponents<App>()
+    .AddInteractiveServerRenderMode();
 
 app.Run();

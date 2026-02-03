@@ -1,9 +1,9 @@
-﻿using System.Net.Http.Headers;
+//  src\KsefGateway.KsefService\Services\KsefAuthService.cs
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using KsefGateway.KsefService.Data;
 using KsefGateway.KsefService.Data.Entities;
@@ -13,15 +13,18 @@ namespace KsefGateway.KsefService.Services
     public class KsefAuthService
     {
         private readonly KsefContext _context;
+        private readonly IHttpClientFactory _httpClientFactory;
         private readonly AppSettingsService _settingsService;
         private readonly ILogger<KsefAuthService> _logger;
 
         public KsefAuthService(
             KsefContext context,
+            IHttpClientFactory httpClientFactory,
             AppSettingsService settingsService,
             ILogger<KsefAuthService> logger)
         {
             _context = context;
+            _httpClientFactory = httpClientFactory;
             _settingsService = settingsService;
             _logger = logger;
         }
@@ -29,16 +32,18 @@ namespace KsefGateway.KsefService.Services
         public async Task<string> GetAccessTokenAsync()
         {
             var nip = await _settingsService.GetValueAsync("Ksef:Nip");
-            if (string.IsNullOrEmpty(nip)) nip = "5423240211"; // Fallback NIP
+            if (string.IsNullOrEmpty(nip)) throw new Exception("NIP not configured.");
 
             var session = await _context.Sessions.FirstOrDefaultAsync(s => s.Nip == nip);
+
             if (session != null && session.AccessTokenExpiresAt > DateTimeOffset.UtcNow.AddMinutes(5))
             {
                 return session.AccessToken;
             }
 
             _logger.LogInformation("Session expired or missing. Performing Full Login (API v2)...");
-            var (newToken, expires) = await PerformFullLoginV2Async(nip);
+
+            var (newToken, newRefToken, expires) = await PerformFullLoginAsync(nip);
 
             if (session == null)
             {
@@ -47,252 +52,166 @@ namespace KsefGateway.KsefService.Services
             }
 
             session.AccessToken = newToken;
+            session.RefreshToken = newRefToken;
             session.AccessTokenExpiresAt = expires;
             
             await _context.SaveChangesAsync();
+            _logger.LogInformation("Login Successful! Token saved.");
+
             return newToken;
         }
 
-        private async Task<(string AccessToken, DateTimeOffset ExpiresAt)> PerformFullLoginV2Async(string nip)
+private async Task<(string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt)> PerformFullLoginAsync(string nip)
         {
-            // === 1. ЧИТАЕМ НАСТРОЙКИ С ЗАЩИТОЙ ОТ ПУСТОТЫ ===
-            var baseUrl = await _settingsService.GetValueAsync("Ksef:BaseUrl");
-            if (string.IsNullOrWhiteSpace(baseUrl)) 
-            {
-                baseUrl = "https://api-test.ksef.mf.gov.pl/v2"; // ЗНАЧЕНИЕ ПО УМОЛЧАНИЮ
-                _logger.LogWarning($"BaseUrl not found in DB. Using default: {baseUrl}");
-            }
-            baseUrl = baseUrl.TrimEnd('/');
-
-            var publicKeyUrl = await _settingsService.GetValueAsync("Ksef:PublicKeyUrl");
-            if (string.IsNullOrWhiteSpace(publicKeyUrl))
-            {
-                publicKeyUrl = "https://api-test.ksef.mf.gov.pl/v2/security/public-key-certificates";
-            }
-
-            var idType = "onip"; // Жестко onip для компаний
+            var baseUrl = (await _settingsService.GetValueAsync("Ksef:BaseUrl")).TrimEnd('/');
+            // Читаем URL ключа из настроек
+            var keyUrlSetting = await _settingsService.GetValueAsync("Ksef:PublicKeyUrl");
+            // Читаем тип идентификатора (по умолчанию Nip)
+            var idType = await _settingsService.GetValueAsync("Ksef:IdentifierType") ?? "Nip";
             
-            var authToken = await _settingsService.GetValueAsync("Ksef:AuthToken");
-            if (string.IsNullOrWhiteSpace(authToken))
-            {
-                // Если токена нет, пробуем хардкод (ваш токен)
-                authToken = "20260127-EC-2B84314000-F8E8C1CAF9-7D|nip-5423240211|e2ca6da648d44d16aa22789a492dea7cc4af600e8a094aaba19f9a4db28d80f3";
-            }
-            authToken = authToken.Trim();
+            var authToken = (await _settingsService.GetValueAsync("Ksef:AuthToken")).Trim();
 
-            var handler = new HttpClientHandler
-            {
-                SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13,
-                ServerCertificateCustomValidationCallback = (sender, cert, chain, sslPolicyErrors) => true
-            };
+            if (string.IsNullOrEmpty(authToken)) throw new Exception("AuthToken not configured.");
 
-            using var client = new HttpClient(handler);
+            var client = _httpClientFactory.CreateClient();
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            client.DefaultRequestHeaders.Add("User-Agent", "KsefGateway/1.0 (IntegrationTest)");
 
-            // --- KROK 1: Challenge ---
+            // --- ШАГ 1: Challenge ---
             var challengeUrl = $"{baseUrl}/auth/challenge";
-            
-            // Correct JSON Structure (identifier + onip)
             var challengeBody = new 
             { 
-                contextIdentifier = new { type = idType, identifier = nip } 
+                contextIdentifier = new { type = idType, value = nip } // Используем idType из настроек
             };
 
-            _logger.LogInformation($"POST {challengeUrl} (Type: {idType})");
-            
+            _logger.LogInformation($"POST {challengeUrl}");
             var challengeResp = await client.PostAsync(challengeUrl, 
                 new StringContent(JsonSerializer.Serialize(challengeBody), Encoding.UTF8, "application/json"));
             
             var challengeContent = await challengeResp.Content.ReadAsStringAsync();
             if (!challengeResp.IsSuccessStatusCode)
-                 throw new Exception($"Auth Init Failed: {challengeContent}");
+                 throw new Exception($"Challenge Error: {challengeContent}");
 
-            using var challengeDoc = JsonDocument.Parse(challengeContent);
+            var challengeDoc = JsonDocument.Parse(challengeContent);
             var timestampStr = challengeDoc.RootElement.GetProperty("timestamp").GetString(); 
             var challenge = challengeDoc.RootElement.GetProperty("challenge").GetString();
+
             var time = DateTimeOffset.Parse(timestampStr!).ToUnixTimeMilliseconds();
 
-            // --- KROK 2: Public Key ---
-            string rawKey = "";
-            try 
+            // --- ШАГ 2: Public Key ---
+            string pemKey = "";
+            var potentialKeyUrls = new List<string>();
+            
+            // Если в настройках есть URL, ставим его первым приоритетом
+            if (!string.IsNullOrEmpty(keyUrlSetting))
             {
-                _logger.LogInformation($"Downloading key from: {publicKeyUrl}");
-                var keyResp = await client.GetAsync(publicKeyUrl);
-                var keyContent = await keyResp.Content.ReadAsStringAsync();
-                
+                potentialKeyUrls.Add(keyUrlSetting);
+            }
+            
+            // Добавляем дефолтные на всякий случай
+            potentialKeyUrls.Add($"{baseUrl}/security/public-key-certificates");
+            potentialKeyUrls.Add("https://ksef-demo.mf.gov.pl/api/security/public-key-certificates"); // Demo Fallback
+            foreach (var url in potentialKeyUrls)
+            {
                 try 
                 {
-                    using var keyDoc = JsonDocument.Parse(keyContent);
-                    JsonElement root = keyDoc.RootElement;
-                    JsonElement keysArray = default;
-
-                    if (root.ValueKind == JsonValueKind.Array) keysArray = root;
-                    else if (root.ValueKind == JsonValueKind.Object)
+                    _logger.LogInformation($"Trying to download key from: {url}");
+                    var keyResp = await client.GetAsync(url);
+                    if (keyResp.IsSuccessStatusCode)
                     {
-                        if (root.TryGetProperty("publicKeyCertificate", out var pkArr)) keysArray = pkArr;
-                        else if (root.TryGetProperty("publicKey", out var pkArr2)) keysArray = pkArr2;
-                    }
-
-                    if (keysArray.ValueKind == JsonValueKind.Array)
-                    {
-                        var lastKeyObj = keysArray.EnumerateArray().LastOrDefault();
-                        if (lastKeyObj.ValueKind != JsonValueKind.Undefined)
+                        var keyDoc = JsonDocument.Parse(await keyResp.Content.ReadAsStringAsync());
+                        if (keyDoc.RootElement.ValueKind == JsonValueKind.Array)
                         {
-                            if(lastKeyObj.TryGetProperty("publicKey", out var pk)) rawKey = pk.GetString()!;
-                            else if(lastKeyObj.TryGetProperty("certificate", out var cert)) rawKey = cert.GetString()!;
+                            var lastKey = keyDoc.RootElement.EnumerateArray().LastOrDefault();
+                            if (lastKey.ValueKind != JsonValueKind.Undefined)
+                            {
+                                if(lastKey.TryGetProperty("publicKey", out var pk)) pemKey = pk.GetString()!;
+                                else if(lastKey.TryGetProperty("certificate", out var cert)) pemKey = cert.GetString()!;
+                                if (!string.IsNullOrEmpty(pemKey)) break;
+                            }
                         }
                     }
                 }
-                catch 
-                {
-                    rawKey = keyContent;
-                }
-                
-                if (string.IsNullOrWhiteSpace(rawKey)) rawKey = keyContent;
+                catch (Exception ex) { _logger.LogWarning($"Error fetching key: {ex.Message}"); }
             }
-            catch (Exception ex) { throw new Exception($"Failed to download Public Key. Error: {ex.Message}"); }
 
-            if (string.IsNullOrWhiteSpace(rawKey)) throw new Exception("Public Key content is empty.");
+            if (string.IsNullOrEmpty(pemKey)) throw new Exception("Could not retrieve Public Key from API.");
 
-            // --- KROK 3: Encrypt ---
-            var encryptedToken = EncryptRsaOaepSha256($"{authToken}|{time}", rawKey);
+            _logger.LogInformation($"Key found (start): {pemKey.Substring(0, Math.Min(30, pemKey.Length))}...");
 
-            // --- KROK 4: Token ---
-            var initUrl = $"{baseUrl}/auth/token/challenge"; 
-            
+            // --- ШАГ 3: Шифрование ---
+            var encrypted = EncryptRsaOaepSha256($"{authToken}|{time}", pemKey);
+
+            // --- ШАГ 4: Init Token ---
+            var initUrl = $"{baseUrl}/auth/ksef-token";
             var authBody = new {
                 challenge = challenge,
-                contextIdentifier = new { type = idType, identifier = nip },
-                token = encryptedToken 
+                contextIdentifier = new { type = idType, value = nip }, // Тут тоже idType
+                encryptedToken = encrypted
             };            
-            
             var initResp = await client.PostAsync(initUrl, 
                 new StringContent(JsonSerializer.Serialize(authBody), Encoding.UTF8, "application/json"));
             
             var initContent = await initResp.Content.ReadAsStringAsync();
-            
-            // Fallback for some endpoints
-            if (!initResp.IsSuccessStatusCode && initResp.StatusCode == System.Net.HttpStatusCode.NotFound)
-            {
-                initUrl = $"{baseUrl}/auth/ksef-token";
-                initResp = await client.PostAsync(initUrl, new StringContent(JsonSerializer.Serialize(authBody), Encoding.UTF8, "application/json"));
-                initContent = await initResp.Content.ReadAsStringAsync();
-            }
+            if (!initResp.IsSuccessStatusCode) 
+                throw new Exception($"Init Session Failed: {initContent}");
 
-            if (!initResp.IsSuccessStatusCode)
-                throw new Exception($"Token Auth Failed: {initContent}");
-
-            using var initDoc = JsonDocument.Parse(initContent);
+            var initDoc = JsonDocument.Parse(initContent);
+            var refNum = initDoc.RootElement.GetProperty("referenceNumber").GetString();
             
-            string sessionToken = "";
+            string tempToken = null!;
+            // Ищем токен в разных местах (v2 может вернуть authenticationToken объект или сразу token)
             if (initDoc.RootElement.TryGetProperty("authenticationToken", out var authTokenElem))
-                 sessionToken = authTokenElem.GetProperty("token").GetString()!;
-            else if (initDoc.RootElement.TryGetProperty("token", out var tElem))
-                 sessionToken = tElem.GetString()!;
+            {
+                tempToken = authTokenElem.GetProperty("token").GetString()!;
+            }
+            else if (initDoc.RootElement.TryGetProperty("token", out var tokenElem))
+            {
+                tempToken = tokenElem.GetString()!;
+            }
+            
+            if(string.IsNullOrEmpty(tempToken))
+                 throw new Exception("Could not extract Session Token from response.");
 
-            if (string.IsNullOrEmpty(sessionToken)) throw new Exception("Token not found in response");
+            // --- В API v2 ПОЛУЧЕННЫЙ ТОКЕН СРАЗУ АКТИВЕН. ШАГ 5 НЕ НУЖЕН. ---
+            // (Проверка статуса удалена, так как endpoint /auth/status не существует)
 
-            return (sessionToken, DateTimeOffset.UtcNow.AddMinutes(90));
+            return (tempToken!, refNum!, DateTimeOffset.UtcNow.AddHours(23));
         }
 
         private string EncryptRsaOaepSha256(string data, string pemKey)
         {
-            var keyClean = pemKey;
-            keyClean = keyClean
+            using var rsa = RSA.Create();
+            var keyClean = pemKey
                 .Replace("-----BEGIN PUBLIC KEY-----", "")
                 .Replace("-----END PUBLIC KEY-----", "")
                 .Replace("-----BEGIN CERTIFICATE-----", "")
                 .Replace("-----END CERTIFICATE-----", "")
-                .Replace("\\n", ""); 
-            keyClean = Regex.Replace(keyClean, @"\s+", "");
+                .Replace("\\n", "").Replace("\n", "").Replace("\r", "").Trim();
 
-            try
+            byte[] keyBytes = Convert.FromBase64String(keyClean);
+
+            try 
             {
-                var keyBytes = Convert.FromBase64String(keyClean);
-                using var rsa = RSA.Create();
-                try { rsa.ImportSubjectPublicKeyInfo(keyBytes, out _); }
-                catch {
+                rsa.ImportSubjectPublicKeyInfo(keyBytes, out _);
+            }
+            catch 
+            {
+                try 
+                {
                     using var cert = X509CertificateLoader.LoadCertificate(keyBytes);
-                    using var certRsa = cert.GetRSAPublicKey();
+                    var certRsa = cert.GetRSAPublicKey();
                     if (certRsa == null) throw new Exception("Certificate has no RSA key");
-                    return Convert.ToBase64String(certRsa.Encrypt(Encoding.UTF8.GetBytes(data), RSAEncryptionPadding.OaepSHA256));
+                    var dataBytes2 = Encoding.UTF8.GetBytes(data);
+                    return Convert.ToBase64String(certRsa.Encrypt(dataBytes2, RSAEncryptionPadding.OaepSHA256));
                 }
-                return Convert.ToBase64String(rsa.Encrypt(Encoding.UTF8.GetBytes(data), RSAEncryptionPadding.OaepSHA256));
-            }
-            catch (FormatException)
-            {
-                var preview = keyClean.Length > 20 ? keyClean.Substring(0, 20) + "..." : keyClean;
-                throw new Exception($"Invalid Base64 Key. Cleaned start: '{preview}'. Length: {keyClean.Length}");
-            }
-        }
-
-        public async Task<string> SendInvoiceDirectAsync(string xmlContent)
-        {
-            _logger.LogInformation(">>> Sending Invoice to KSeF v2 (Test)...");
-
-            var baseUrl = (await _settingsService.GetValueAsync("Ksef:BaseUrl"));
-             if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = "https://api-test.ksef.mf.gov.pl/v2";
-            baseUrl = baseUrl.TrimEnd('/');
-
-            var token = await GetAccessTokenAsync(); 
-
-            var xmlBytes = Encoding.UTF8.GetBytes(xmlContent);
-            var fileSize = xmlBytes.Length;
-
-            using var sha256 = SHA256.Create();
-            var hashBytes = sha256.ComputeHash(xmlBytes);
-            var hashBase64 = Convert.ToBase64String(hashBytes);
-
-            var requestObj = new
-            {
-                invoiceHash = new
+                catch (Exception ex)
                 {
-                    fileSize = fileSize,
-                    hashSHA = new { algorithm = "SHA-256", encoding = "Base64", value = hashBase64 }
-                },
-                invoicePayload = new
-                {
-                    type = "plain",
-                    invoiceBody = xmlContent
+                     throw new Exception($"Failed to parse Public Key. Error: {ex.Message}");
                 }
-            };
-            
-            var jsonString = JsonSerializer.Serialize(requestObj);
-            
-            var handler = new HttpClientHandler
-            {
-                SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13,
-                ServerCertificateCustomValidationCallback = (sender, cert, chain, sslPolicyErrors) => true
-            };
-
-            using var client = new HttpClient(handler);
-            var endpoint = $"{baseUrl}/online/Invoice/Send";
-
-            client.DefaultRequestHeaders.Add("SessionToken", token);
-            client.DefaultRequestHeaders.Add("User-Agent", "KsefGateway/1.0 (IntegrationTest)");
-            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-            using var httpContent = new StringContent(jsonString, Encoding.UTF8, "application/json");
-            httpContent.Headers.ContentLength = Encoding.UTF8.GetByteCount(jsonString);
-
-            _logger.LogInformation($"PUT {endpoint} | Size: {fileSize} bytes");
-
-            var response = await client.PutAsync(endpoint, httpContent);
-            var responseContent = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogError($"❌ KSeF v2 Error ({response.StatusCode}): {responseContent}");
-                throw new Exception($"KSeF v2 Error ({response.StatusCode}): {responseContent}");
             }
 
-            using var doc = JsonDocument.Parse(responseContent);
-            var refNum = doc.RootElement.GetProperty("elementReferenceNumber").GetString();
-            var code = doc.RootElement.GetProperty("processingCode").GetString();
-
-            _logger.LogInformation($"✅ SUCCESS! Ref: {refNum}, Code: {code}");
-            return refNum ?? "SENT";
+            var dataBytes = Encoding.UTF8.GetBytes(data);
+            return Convert.ToBase64String(rsa.Encrypt(dataBytes, RSAEncryptionPadding.OaepSHA256));
         }
     }
 }
